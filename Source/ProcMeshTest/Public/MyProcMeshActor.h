@@ -8,6 +8,7 @@
 
 class UProceduralMeshComponent;
 class UMaterial;
+class ASplineActor;
 
 UCLASS()
 class PROCMESHTEST_API AMyProcMeshActor : public AActor
@@ -22,7 +23,7 @@ protected:
 	TObjectPtr<UMaterial> Material;
 
 	UFUNCTION(CallInEditor, Category = "MeshGeneration")
-	void DrawMesh();
+	void DrawMesh(float DeltaTime);
 
 	UPROPERTY(EditAnywhere, Category = "MeshGeneration")
 	int SegmentCount = 32;
@@ -32,9 +33,12 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "MeshGeneration")
 	int VerticesPerPoint = 8;
+	
+	UPROPERTY(EditAnywhere, Category = "MeshGeneration")
+	float ThicknessStart = 10.0f;
 
 	UPROPERTY(EditAnywhere, Category = "MeshGeneration")
-	float Thickness = 10.0f;
+	float ThicknessEnd = 10.0f;
 
 	UPROPERTY(EditAnywhere, Category = "MeshGeneration")
 	float Flattening = 200.0f;
@@ -42,10 +46,17 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "MeshGeneration")
 	bool bDrawDebug = false;
 
+	UPROPERTY(EditAnywhere, Category = "MeshGeneration")
+	bool bDrawMesh = true;
+
 	UPROPERTY(VisibleAnywhere, Category = "MeshGeneration")
 	int TriangleCount = 0;
 
+	UPROPERTY(EditAnywhere, Category = "MeshGeneration")
+	float BitangentRotation = 0.0f;
 
+	UPROPERTY(EditAnywhere)
+	TObjectPtr<ASplineActor> Spline;
 
 
 protected:
@@ -58,5 +69,6 @@ public:
 
 	// Called every frame
 	virtual void Tick(float DeltaTime) override;
+	virtual bool ShouldTickIfViewportsOnly() const override { return true; }
 
 };

@@ -2,6 +2,7 @@
 
 #include "MyProcMeshActor.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "SplineActor.h"
 #include "ProceduralMeshComponent.h"
 
 // Sets default values
@@ -12,6 +13,7 @@ AMyProcMeshActor::AMyProcMeshActor()
 
  	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
+	
 
 }
 
@@ -25,10 +27,10 @@ void AMyProcMeshActor::BeginPlay()
 void AMyProcMeshActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-
+	DrawMesh(DeltaTime);
 }
 
-void AMyProcMeshActor::DrawMesh()
+void AMyProcMeshActor::DrawMesh(float DeltaTime)
 {
 	RootProcMeshComponent->ClearAllMeshSections();
 
@@ -38,65 +40,76 @@ void AMyProcMeshActor::DrawMesh()
 	TArray<FVector2D> UV0;
 
 	TArray<FVector> MidPoints;
-	TArray<FVector> Derivates;
+	TArray<FVector> Tangents;
 
 	int PointCount = SegmentCount + 1;
 
-	//Generate MidPoints, points along the line; F(X) = Y^2 / 200
+	if (!Spline) return;
+	if (!bDrawMesh && !bDrawDebug) return;
+
+	//Generate points along the spline
 	for (int i = 0; i < PointCount; i++)
 	{
-		FVector Point;
-		Point.Y = (i - PointCount / 2) * Length / PointCount;
-		Point.Z = Point.Y * Point.Y / Flattening;
-		MidPoints.Add(Point);
+		float a = (float)i / ((float)(PointCount-1));
+		MidPoints.Add(Spline->GetSplinePoint(a));
 	}
 
-	//Generate Derivates
-	Derivates.Add(MidPoints[1] - MidPoints[0]);
-	Derivates[0].Normalize();
+	//Generate Tangents using simplified central difference. Edge cases use forward/backward difference
+	Tangents.Add(MidPoints[1] - MidPoints[0]);
+	Tangents[0].Normalize();
 	for (int i = 1; i < PointCount - 1; i++)
 	{
 		FVector DeltaForward = MidPoints[i + 1] - MidPoints[i];
 		FVector DeltaBackward = MidPoints[i] - MidPoints[i - 1];
-		FVector Derivate = (DeltaForward + DeltaBackward) / 2;
-		Derivate.Normalize();
-		Derivates.Add(Derivate);
+		FVector Tangent = (DeltaForward + DeltaBackward) / 2;
+		Tangent.Normalize();
+		Tangents.Add(Tangent);
 	}
-	Derivates.Add(MidPoints[PointCount - 1] - MidPoints[PointCount - 2]);
-	Derivates[PointCount - 1].Normalize();
-
-	//Generate vertices and their UV coordinates
-	for (int i = 0; i < PointCount; i++)
+	Tangents.Add(MidPoints[PointCount - 1] - MidPoints[PointCount - 2]);
+	Tangents[PointCount - 1].Normalize();
+	
+	//Generate the first bitangent vector and segment vertices. 
+	//Note that the first bitangent is selected arbitrarilly. 
+	//BitangentRotation variable should lets user manually select start point.
+	FVector BaseBitangent;
+	TArray<FVector> SegmentVertices;
+	BaseBitangent.X = Tangents[0].Y - Tangents[0].Z;
+	BaseBitangent.Y = Tangents[0].Z - Tangents[0].X;
+	BaseBitangent.Z = Tangents[0].X - Tangents[0].Y;
+	BaseBitangent.Normalize();
+	BaseBitangent = BaseBitangent.RotateAngleAxis(BitangentRotation, Tangents[0]);
+	for (int i = 0; i < VerticesPerPoint; i++)
 	{
-		//Creates BaseVector, an arbitrarilly chosen vector orthogonal to the derivative
-		FVector BaseVector;
-		BaseVector.X = Derivates[i].Y - Derivates[i].Z;
-		BaseVector.Y = Derivates[i].Z - Derivates[i].X;
-		BaseVector.Z = Derivates[i].X - Derivates[i].Y;
-		BaseVector.Normalize();
+		FVector Vertex = MidPoints[0] + ThicknessStart * BaseBitangent.RotateAngleAxis(360.0f * i / VerticesPerPoint, Tangents[0]);
+		SegmentVertices.Add(Vertex);
+	}
+	Vertices.Append(SegmentVertices);
 
-		TArray<FVector> SegmentVertices;
+	//Generate the remaining segment vertices by projecting the previous bitangent onto the current tangents normal plane.
+	for (int i = 1; i < PointCount; i++)
+	{
+		SegmentVertices.Empty();
+		FVector NextBitangent = Tangents[i].Cross(BaseBitangent.Cross(Tangents[i]));
+		NextBitangent.Normalize();
+		BaseBitangent = NextBitangent;
 		for (int j = 0; j < VerticesPerPoint; j++)
 		{
-			//Rotate BaseVector around the normal (the derivative) to create a circle of points
-			FVector Vertex = MidPoints[i] + Thickness * BaseVector.RotateAngleAxis(360.0f * j / VerticesPerPoint, Derivates[i]);
+			FVector Vertex = MidPoints[i] + FMath::Lerp(ThicknessStart, ThicknessEnd, (float)i / (float)PointCount) * BaseBitangent.RotateAngleAxis(360.0f * j / VerticesPerPoint, Tangents[i]);
 			SegmentVertices.Add(Vertex);
+		}
+		Vertices.Append(SegmentVertices);
+	}
 
-			//Determine UV coordinate; X coordinate goes along the pipe; Y coordinate goes around.
+	//Determine UV coordinate; X coordinate goes along the pipe; Y coordinate goes around.
+	for (int i = 0; i < PointCount; i++)
+	{
+		for (int j = 0; j < VerticesPerPoint; j++)
+		{
 			FVector2D UV;
 			UV.X = (double)i / (double)PointCount;
 			UV.Y = FMath::Abs((double)j - (double)VerticesPerPoint / 2.0) / ((double)VerticesPerPoint / 2.0);
 			UV0.Add(UV);
 		}
-		while (SegmentVertices[0].Z < SegmentVertices[1].Z || SegmentVertices[0].Z < SegmentVertices.Last().Z)
-		{
-			FVector RemoveVertex = SegmentVertices[0];
-			SegmentVertices.RemoveAt(0);
-			SegmentVertices.Add(RemoveVertex);
-		}
-
-		Vertices.Append(SegmentVertices);
-
 	}
 
 	//Generate triangles
@@ -121,7 +134,6 @@ void AMyProcMeshActor::DrawMesh()
 			Triangles.Add(FourthVertex);
 		}
 	}
-
 	TriangleCount = Triangles.Num() / 3;
 
 	if (bDrawDebug)
@@ -129,19 +141,21 @@ void AMyProcMeshActor::DrawMesh()
 		FVector BasePos = GetActorLocation();
 		for (int i = 0; i < PointCount; i++)
 		{
-			UKismetSystemLibrary::DrawDebugPoint(this, BasePos + MidPoints[i], 5.0f, FLinearColor::Blue, 20.0f);
+			UKismetSystemLibrary::DrawDebugPoint(this, BasePos + MidPoints[i], 5.0f, FLinearColor::Blue, DeltaTime * 2.0f);
 			if (i > 0)
-				UKismetSystemLibrary::DrawDebugLine(this, BasePos + MidPoints[i - 1], BasePos + MidPoints[i], FLinearColor::Blue, 20.0f);
+				UKismetSystemLibrary::DrawDebugLine(this, BasePos + MidPoints[i - 1], BasePos + MidPoints[i], FLinearColor::Blue, DeltaTime * 2.0f);
 
-			UKismetSystemLibrary::DrawDebugLine(this, BasePos + MidPoints[i], BasePos + MidPoints[i] + Derivates[i] * 100.0f, FLinearColor::Red, 20.0f);
+			UKismetSystemLibrary::DrawDebugLine(this, BasePos + MidPoints[i], BasePos + MidPoints[i] + Tangents[i] * 100.0f, FLinearColor::Red, DeltaTime * 2.0f);
 		}
 		for (FVector Vertex : Vertices)
 		{
-			UKismetSystemLibrary::DrawDebugPoint(this, BasePos + Vertex, 5.0f, FLinearColor::Green, 20.0f);
+			UKismetSystemLibrary::DrawDebugPoint(this, BasePos + Vertex, 5.0f, FLinearColor::Green, DeltaTime * 2.0f);
 		}
 	}
-
-	RootProcMeshComponent->CreateMeshSection_LinearColor(0, Vertices, Triangles, TArray<FVector>(), UV0, Colors, TArray<FProcMeshTangent>(), true);
-	RootProcMeshComponent->SetMaterial(0, Material);
+	if (bDrawMesh) 
+	{
+		RootProcMeshComponent->CreateMeshSection_LinearColor(0, Vertices, Triangles, TArray<FVector>(), UV0, Colors, TArray<FProcMeshTangent>(), true);
+		RootProcMeshComponent->SetMaterial(0, Material);
+	}
 }
 
